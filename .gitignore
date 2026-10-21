@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Test / run artifacts
+.pytest_cache/
+runs/
+
+# DeepEval 评测运行缓存与运行序号
+.deepeval/
+.eval_run_seq
+
+# 本地评测产物（分数报告、Langfuse trace 导出）
+score_report_*.json
+50509707577ef72a1339a0c4798c50be.json
+b9e529b40e00fbc09e6dcaa737067485.json
+
+# 本地数据集（体积大，不入库；运行前按需放置或用 hf_dataset 下载）
+mydataset/

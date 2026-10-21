@@ -1,0 +1,69 @@
+# 示例评测配置。把这份文件复制改造成自己的评测即可。
+name: gsm8k
+
+dataset:
+  kind: local                 # local | huggingface
+  path: mydataset/gsm8k       # huggingface 时也用作本地缓存目录
+  # repo_id: openai/gsm8k     # kind=huggingface 时填写
+  config: main                # HF 布局的 config 名
+  split: test
+  limit: 20
+  field_spec:
+    id: null
+    input: question
+    target: answer
+
+agent:
+  model: deepseek-v4-pro
+  prompt_template: |
+    请解答下面的问题，最后单独一行给出最终答案。
+
+    {input}
+  project_root: .
+  sandbox: workspace-write
+  max_concurrent: 4
+  max_attempts: 2
+  retry_backoff_seconds: 1.0
+  ephemeral: false
+  epochs: 1                    # 每个样本跑几次，用于 pass@k
+  epoch_reducer: pass_at_k     # pass_at_k | average
+  pass_k: null                 # null 表示取 epochs 作为 k
+  seed: null                   # 记录进 trace metadata，便于复现
+
+judge:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY
+  evidence: final_answer      # final_answer | trajectory
+  scoring: single_call        # single_call | per_dimension
+  threshold: 0.5
+  max_concurrent: 4
+  throttle_seconds: 1.0
+  max_retries: 3
+  temperature: 0.0
+  # 不写 dimensions 时使用内置通用 5 维；也可在这里覆盖：
+  # dimensions:
+  #   - name: correctness
+  #     criteria: 评估回答在事实层面是否正确。
+  #     steps: ["逐步核验计算与推理是否正确。"]
+  #     weight: 1.0
+  #     threshold: 0.5
+
+scorers:
+  - name: final_answer
+    type: regex
+    threshold: 1.0
+    params:
+      pattern: '####\s*([-+]?\d+(?:,\d+)*(?:\.\d+)?)'
+      extract_from_target: true
+
+langfuse:
+  upload: true
+  environment_prefix: eval
+  fetch_limit: null
+
+run:
+  run_dir: runs
+  resume: true
+  run_id: null
