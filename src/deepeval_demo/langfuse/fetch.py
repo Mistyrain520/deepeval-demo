@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from ..executor import ExecResult
+from ..log import get_logger, log_event
 
 FIELDS = "core,basic,time,io,metadata,model,usage,trace_context"
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -114,6 +117,14 @@ def fetch_traces(
     to_time: datetime | None = None,
 ) -> list[TraceRecord]:
     """分页拉取 root observation（即 trace 列表），可选附带全量 observation。"""
+    started = time.perf_counter()
+    log_event(
+        logger,
+        "INFO",
+        "langfuse.fetch.start",
+        environment=environment,
+        limit=limit,
+    )
     collected: list[TraceRecord] = []
     seen: set[str] = set()
     cursor = None
@@ -147,6 +158,15 @@ def fetch_traces(
     if include_observations:
         for record in collected:
             record.observations = fetch_trace_observations(client, record.trace_id)
+    log_event(
+        logger,
+        "INFO",
+        "langfuse.fetch.done",
+        environment=environment,
+        limit=limit,
+        trace_count=len(collected),
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
     return collected
 
 

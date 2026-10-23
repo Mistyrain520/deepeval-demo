@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,8 +33,11 @@ from .langfuse import (
     upload_scorer_scores,
     upload_scores,
 )
+from .log import configure_logging, get_logger, log_event
 from .report import RunReport, assemble_report, print_summary, write_report
 from .scorer import ScorerResult, reduce_epoch_scores, run_scorers
+
+logger = get_logger(__name__)
 
 
 def make_run_id(prefix: str = "eval") -> str:
@@ -352,10 +356,19 @@ def evaluate(
     selected: list[tuple[dict[str, dict[str, Any]], int, ExecResult]] = []
     judge_inputs = []
     for run in sample_runs:
+        scorer_started = time.perf_counter()
         epoch_scores = [
             run_scorers(scorer_specs, r.answer or "", run.sample.target)
             for r in run.epochs
         ]
+        log_event(
+            logger,
+            "DEBUG",
+            "scorer.run.done",
+            sample_id=run.sample.id,
+            scorers=len(scorer_specs),
+            duration_ms=round((time.perf_counter() - scorer_started) * 1000, 2),
+        )
         det_stats = reduce_epoch_scores(
             epoch_scores,
             scorer_specs,
@@ -416,14 +429,27 @@ def publish(
     """步骤4：把 judge/scorer 分数回传 Langfuse（统一 metadata）。"""
     if not upload:
         return []
+    started = time.perf_counter()
     resolved_run_id = run_id or make_run_id(name or "eval")
     resolved_name = name or resolved_run_id
+    log_event(
+        logger,
+        "INFO",
+        "langfuse.publish.start",
+        run_id=resolved_run_id,
+        samples=len(sample_results),
+    )
 
     if client is None:
         try:
             client = build_client(load_langfuse_config())
         except Exception as exc:  # noqa: BLE001
-            print(f"[publish] Langfuse 不可用，跳过上传: {exc}")
+            log_event(
+                logger,
+                "WARNING",
+                "langfuse.config.error",
+                error=str(exc),
+            )
             return []
 
     trace_index: dict[tuple[str, str | None], str] = {}
@@ -438,9 +464,15 @@ def publish(
             )
             trace_index = build_trace_index(fetched, prefer_latest_round=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"[publish] 拉取 trace 失败: {exc}")
+            log_event(
+                logger,
+                "WARNING",
+                "langfuse.fetch.error",
+                error=str(exc),
+            )
 
     records: list[ScoreRecord] = []
+    skipped = 0
     for result in sample_results:
         trace_id = result.sample.trace_id
         if not trace_id:
@@ -448,6 +480,7 @@ def publish(
                 (result.sample.id, str(result.selected_epoch))
             ) or trace_index.get((result.sample.id, None))
         if not trace_id:
+            skipped += 1
             continue
         run_meta = {
             "evaluation_run_id": resolved_run_id,
@@ -482,7 +515,22 @@ def publish(
                     )
                 )
         except Exception as exc:  # noqa: BLE001
-            print(f"[publish] 上传 {result.sample.id} 失败: {exc}")
+            log_event(
+                logger,
+                "WARNING",
+                "langfuse.upload.error",
+                sample_id=result.sample.id,
+                error=str(exc),
+            )
+    log_event(
+        logger,
+        "INFO",
+        "langfuse.publish.done",
+        run_id=resolved_run_id,
+        uploaded=len(records),
+        skipped=skipped,
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
     return records
 
 
@@ -541,6 +589,7 @@ def run(
     *,
     agent: Agent | None = None,
     model: str = "deepseek-chat",
+    dimensions: list[DimensionSpec | dict] | None = None,
     scorers: list[ScorerSpec | dict] | None = None,
     run_id: str | None = None,
     run_dir: str | Path = "runs",
@@ -549,12 +598,22 @@ def run(
     **judge_kwargs: Any,
 ) -> RunReport:
     """一步到位：跑 agent -> 评分 -> 上传 -> 生成报告。"""
+    configure_logging()
     resolved_run_id = run_id or make_run_id(name or "eval")
     resolved_name = name or resolved_run_id
+    log_event(
+        logger,
+        "INFO",
+        "run.start",
+        run_id=resolved_run_id,
+        samples=len(samples),
+    )
     agent = agent or CodexAgent()
 
     runs = agent.run(samples, run_dir=run_dir, run_id=resolved_run_id)
-    results = evaluate(runs, model=model, scorers=scorers, **judge_kwargs)
+    results = evaluate(
+        runs, model=model, dimensions=dimensions, scorers=scorers, **judge_kwargs
+    )
     publish(results, run_id=resolved_run_id, upload=upload, name=resolved_name)
 
     agent_config = getattr(agent, "config", None)

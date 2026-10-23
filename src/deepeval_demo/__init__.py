@@ -64,6 +64,7 @@ from .langfuse import (
     upload_scorer_scores,
     upload_scores,
 )
+from .log import configure_logging, get_logger
 from .orchestrate import RunReport, run_eval
 from .report import assemble_report
 from .scorer import ScorerResult, reduce_epoch_scores, register_scorer, run_scorers
@@ -121,6 +122,8 @@ __all__ = [
     "resolve_trace_ids",
     "upload_scorer_scores",
     "upload_scores",
+    "configure_logging",
+    "get_logger",
     "ScorerResult",
     "reduce_epoch_scores",
     "register_scorer",

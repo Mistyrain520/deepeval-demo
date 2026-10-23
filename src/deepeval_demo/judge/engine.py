@@ -10,7 +10,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from ..config import DimensionSpec, JudgeConfig
+from ..log import get_logger, log_event
 from .schemas import JudgeInput, JudgeVerdict, ScoreResult
+
+logger = get_logger(__name__)
 
 
 class JudgeError(RuntimeError):
@@ -281,18 +284,56 @@ def _judge_per_dimension(client: Any, inp: JudgeInput, dims: list[DimensionSpec]
 def _judge_one_with_retry(
     client: Any, inp: JudgeInput, dims: list[DimensionSpec], cfg: JudgeConfig
 ) -> JudgeVerdict:
+    sample_started = time.perf_counter()
     last_error: Exception | None = None
     for attempt in range(1, cfg.max_retries + 1):
+        log_event(
+            logger,
+            "DEBUG",
+            "judge.sample.start",
+            sample_id=inp.sample_id,
+            attempt=attempt,
+            scoring=cfg.scoring,
+        )
         try:
             if cfg.scoring == "per_dimension":
-                return _judge_per_dimension(client, inp, dims, cfg)
-            return _judge_single_call(client, inp, dims, cfg)
+                verdict = _judge_per_dimension(client, inp, dims, cfg)
+            else:
+                verdict = _judge_single_call(client, inp, dims, cfg)
+            log_event(
+                logger,
+                "INFO",
+                "judge.sample.done",
+                sample_id=inp.sample_id,
+                attempt=attempt,
+                duration_ms=round((time.perf_counter() - sample_started) * 1000, 2),
+                passed=verdict.passed,
+            )
+            return verdict
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if attempt < cfg.max_retries:
-                time.sleep(2.0 * attempt)
+                sleep_s = 2.0 * attempt
+                log_event(
+                    logger,
+                    "WARNING",
+                    "judge.retry",
+                    sample_id=inp.sample_id,
+                    attempt=attempt,
+                    sleep_s=sleep_s,
+                    error=str(exc),
+                )
+                time.sleep(sleep_s)
 
     reason = f"评测失败: {last_error}"
+    log_event(
+        logger,
+        "ERROR",
+        "judge.sample.error",
+        sample_id=inp.sample_id,
+        duration_ms=round((time.perf_counter() - sample_started) * 1000, 2),
+        error=reason,
+    )
     scores = [
         ScoreResult(dimension=dim.name, score=0.0, reason=reason, passed=False)
         for dim in dims
@@ -312,6 +353,16 @@ def judge_batch(
     if not dims:
         raise JudgeError("没有配置任何评分维度")
 
+    batch_started = time.perf_counter()
+    log_event(
+        logger,
+        "INFO",
+        "judge.batch.start",
+        inputs=len(inputs),
+        model=cfg.model,
+        dimensions=len(dims),
+        concurrency=max(1, cfg.max_concurrent),
+    )
     client = _make_client(cfg)
     results: list[JudgeVerdict | None] = [None] * len(inputs)
     workers = max(1, cfg.max_concurrent)
@@ -323,4 +374,12 @@ def judge_batch(
         for future in as_completed(future_to_index):
             index = future_to_index[future]
             results[index] = future.result()
+    log_event(
+        logger,
+        "INFO",
+        "judge.batch.done",
+        inputs=len(inputs),
+        duration_ms=round((time.perf_counter() - batch_started) * 1000, 2),
+        passed=sum(1 for v in results if v is not None and v.passed),
+    )
     return [r for r in results if r is not None]

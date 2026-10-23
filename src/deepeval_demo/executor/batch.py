@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import ExecutorConfig
 from ..data import Sample
+from ..log import get_logger, log_event
 from .runner import ExecResult, SampleRun, run_one, run_one_multi_turn
+
+logger = get_logger(__name__)
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -71,6 +75,7 @@ def run_batch(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     resolved_run_id = run_id or run_dir.name
+    batch_started = time.perf_counter()
 
     state = _load_state(run_dir)
     to_run = [
@@ -78,6 +83,18 @@ def run_batch(
         for s in samples
         if not (resume and state.get(s.id, {}).get("status") == STATUS_DONE)
     ]
+    log_event(
+        logger,
+        "INFO",
+        "exec.batch.start",
+        run_id=resolved_run_id,
+        samples=len(samples),
+        to_run=len(to_run),
+        epochs=max(1, cfg.epochs),
+        epoch=epoch,
+        max_concurrent=cfg.max_concurrent,
+        model=cfg.model,
+    )
 
     fresh: dict[str, ExecResult] = {}
     if to_run:
@@ -87,6 +104,14 @@ def run_batch(
             async with sem:
                 last: ExecResult | None = None
                 for attempt in range(1, cfg.max_attempts + 1):
+                    log_event(
+                        logger,
+                        "INFO",
+                        "exec.sample.start",
+                        sample_id=sample.id,
+                        attempt=attempt,
+                        epoch=epoch,
+                    )
                     _append_state(
                         run_dir,
                         {
@@ -100,6 +125,7 @@ def run_batch(
                         runner = run_one_multi_turn
                     else:
                         runner = run_one
+                    attempt_started = time.perf_counter()
                     result = await asyncio.to_thread(
                         runner,
                         sample,
@@ -109,8 +135,23 @@ def run_batch(
                         epoch=epoch,
                         metadata=metadata,
                     )
+                    duration_ms = round(
+                        (time.perf_counter() - attempt_started) * 1000, 2
+                    )
                     last = result
                     if result.ok:
+                        log_event(
+                            logger,
+                            "INFO",
+                            "exec.sample.done",
+                            sample_id=sample.id,
+                            attempt=attempt,
+                            epoch=epoch,
+                            ok=True,
+                            rounds_used=result.rounds_used,
+                            duration_ms=duration_ms,
+                            exit_code=result.exit_code,
+                        )
                         _append_state(
                             run_dir,
                             {
@@ -127,6 +168,17 @@ def run_batch(
                         )
                         return result
                     status = STATUS_FAILED if attempt == cfg.max_attempts else STATUS_PENDING
+                    log_event(
+                        logger,
+                        "ERROR",
+                        "exec.sample.error",
+                        sample_id=sample.id,
+                        attempt=attempt,
+                        epoch=epoch,
+                        ok=False,
+                        duration_ms=duration_ms,
+                        error=result.error,
+                    )
                     _append_state(
                         run_dir,
                         {
@@ -139,8 +191,17 @@ def run_batch(
                         },
                     )
                     if attempt < cfg.max_attempts:
+                        backoff_s = cfg.retry_backoff_seconds * (2 ** (attempt - 1))
+                        log_event(
+                            logger,
+                            "WARNING",
+                            "exec.retry",
+                            sample_id=sample.id,
+                            attempt=attempt,
+                            backoff_s=backoff_s,
+                        )
                         await asyncio.sleep(
-                            cfg.retry_backoff_seconds * (2 ** (attempt - 1))
+                            backoff_s
                         )
                 return last or ExecResult(
                     sample_id=sample.id, input=sample.input, ok=False, error="未执行"
@@ -174,6 +235,15 @@ def run_batch(
                     sample_id=sample.id, input=sample.input, ok=False, error="未执行"
                 )
             )
+    log_event(
+        logger,
+        "INFO",
+        "exec.batch.done",
+        run_id=resolved_run_id,
+        epoch=epoch,
+        duration_ms=round((time.perf_counter() - batch_started) * 1000, 2),
+        done=sum(1 for r in results if r.ok),
+    )
     return results
 
 
@@ -190,10 +260,20 @@ def run_batch_epochs(
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     epochs = max(1, cfg.epochs)
+    resolved_run_id = run_id or run_dir.name
 
     per_epoch: list[list[ExecResult]] = []
     for current_epoch in range(1, epochs + 1):
         sub_dir = run_dir if epochs == 1 else run_dir / f"epoch-{current_epoch}"
+        epoch_started = time.perf_counter()
+        log_event(
+            logger,
+            "INFO",
+            "exec.epoch.start",
+            run_id=resolved_run_id,
+            epoch=current_epoch,
+            samples=len(samples),
+        )
         per_epoch.append(
             run_batch(
                 samples,
@@ -204,6 +284,14 @@ def run_batch_epochs(
                 epoch=current_epoch,
                 metadata=metadata,
             )
+        )
+        log_event(
+            logger,
+            "INFO",
+            "exec.epoch.done",
+            run_id=resolved_run_id,
+            epoch=current_epoch,
+            duration_ms=round((time.perf_counter() - epoch_started) * 1000, 2),
         )
 
     return [

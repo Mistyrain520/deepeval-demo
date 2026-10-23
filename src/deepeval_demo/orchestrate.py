@@ -18,7 +18,10 @@ from .langfuse import (
     fetch_traces,
     load_langfuse_config,
 )
+from .log import configure_logging, get_logger, log_event
 from .report import RunReport, assemble_report, print_summary, write_report
+
+logger = get_logger(__name__)
 
 
 def _codex_version() -> str | None:
@@ -68,12 +71,23 @@ def _fetch_traces(config: EvalConfig, environment: str):
 
 def run_eval(config: EvalConfig) -> RunReport:
     """执行完整评测流程，返回 RunReport（同时落盘 run_dir/report.json）。"""
+    configure_logging()
     run_id = config.run.run_id or make_run_id(config.name)
     run_dir = Path(config.run.run_dir)
+    log_event(
+        logger,
+        "INFO",
+        "run.start",
+        run_id=run_id,
+        name=config.name,
+        resume=config.run.resume,
+    )
 
     samples = load_dataset(config.dataset)
     dataset_hash = _dataset_hash(samples)
     codex_version = _codex_version()
+    if codex_version:
+        log_event(logger, "DEBUG", "exec.codex.resolve", version=codex_version)
 
     agent = CodexAgent(
         model=config.agent.model,
@@ -105,7 +119,7 @@ def run_eval(config: EvalConfig) -> RunReport:
     environment = f"{config.langfuse.environment_prefix}-{run_id}"
     lf_client, traces, lf_error = _fetch_traces(config, environment)
     if lf_error:
-        print(f"[langfuse] {lf_error}")
+        log_event(logger, "WARNING", "langfuse.fetch.error", error=lf_error)
     trace_index = build_trace_index(traces, prefer_latest_round=True)
     trace_by_id = {t.trace_id: t for t in traces}
     observations_by_sample: dict[str, list[dict]] = {}

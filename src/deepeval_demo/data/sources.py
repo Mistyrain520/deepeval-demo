@@ -10,8 +10,10 @@ from typing import Any
 import pyarrow.parquet as pq
 
 from ..config import DataSourceSpec
+from ..log import get_logger, log_event, log_span
 
 SUPPORTED_SUFFIXES = {".parquet", ".json", ".jsonl", ".ndjson"}
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -114,14 +116,15 @@ def download_hf(
 
     local = Path(local_dir)
     local.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type=repo_type,
-        local_dir=str(local),
-        allow_patterns=allow_patterns,
-        token=token,
-        revision=revision,
-    )
+    with log_span(logger, "dataset.download", repo_id=repo_id, local_dir=str(local)):
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            local_dir=str(local),
+            allow_patterns=allow_patterns,
+            token=token,
+            revision=revision,
+        )
     return local
 
 
@@ -154,31 +157,33 @@ def _records_from_source(spec: DataSourceSpec) -> tuple[list[dict[str, Any]], Pa
 
 def load_dataset(spec: DataSourceSpec) -> list[Sample]:
     """按 DataSourceSpec 读取数据集，返回 Sample 列表。"""
-    records, _ = _records_from_source(spec)
-    fs = spec.field_spec
+    with log_span(logger, "dataset.load", path=spec.path, kind=spec.kind):
+        records, _ = _records_from_source(spec)
+        fs = spec.field_spec
 
-    samples: list[Sample] = []
-    for index, rec in enumerate(records):
-        if fs.input not in rec or rec[fs.input] is None:
-            continue
-        if fs.id and fs.id in rec and rec[fs.id] is not None:
-            sample_id = _as_text(rec[fs.id])
-        else:
-            sample_id = f"sample-{index + 1:06d}"
-        target = None
-        if fs.target and fs.target in rec and rec[fs.target] is not None:
-            target = _as_text(rec[fs.target])
-        excluded = {fs.input, fs.target, fs.id}
-        metadata = {k: v for k, v in rec.items() if k not in excluded}
-        samples.append(
-            Sample(
-                id=sample_id,
-                input=_as_text(rec[fs.input]),
-                target=target,
-                metadata=metadata,
+        samples: list[Sample] = []
+        for index, rec in enumerate(records):
+            if fs.input not in rec or rec[fs.input] is None:
+                continue
+            if fs.id and fs.id in rec and rec[fs.id] is not None:
+                sample_id = _as_text(rec[fs.id])
+            else:
+                sample_id = f"sample-{index + 1:06d}"
+            target = None
+            if fs.target and fs.target in rec and rec[fs.target] is not None:
+                target = _as_text(rec[fs.target])
+            excluded = {fs.input, fs.target, fs.id}
+            metadata = {k: v for k, v in rec.items() if k not in excluded}
+            samples.append(
+                Sample(
+                    id=sample_id,
+                    input=_as_text(rec[fs.input]),
+                    target=target,
+                    metadata=metadata,
+                )
             )
-        )
 
-    if spec.limit is not None:
-        samples = samples[: spec.limit]
-    return samples
+        if spec.limit is not None:
+            samples = samples[: spec.limit]
+        log_event(logger, "INFO", "dataset.loaded", rows=len(samples))
+        return samples

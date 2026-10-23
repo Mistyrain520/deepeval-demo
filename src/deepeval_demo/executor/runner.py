@@ -7,12 +7,16 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..config import ExecutorConfig
 from ..data import Sample
+from ..log import get_logger, log_event
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -115,9 +119,12 @@ def build_command(
 def resolve_codex(cfg: ExecutorConfig | None = None) -> str:
     """定位 codex 可执行文件：显式路径 -> PATH -> 已知安装目录（取最新）。"""
     if cfg is not None and cfg.codex_path:
-        return str(cfg.codex_path)
+        resolved = str(cfg.codex_path)
+        log_event(logger, "DEBUG", "exec.codex.resolve", path=resolved)
+        return resolved
     found = shutil.which("codex")
     if found:
+        log_event(logger, "DEBUG", "exec.codex.resolve", path=found)
         return found
     localappdata = os.environ.get("LOCALAPPDATA", "")
     if localappdata:
@@ -129,7 +136,11 @@ def resolve_codex(cfg: ExecutorConfig | None = None) -> str:
                 reverse=True,
             )
             if candidates:
+                log_event(
+                    logger, "DEBUG", "exec.codex.resolve", path=str(candidates[0])
+                )
                 return str(candidates[0])
+    log_event(logger, "DEBUG", "exec.codex.resolve", path="codex")
     return "codex"
 
 
@@ -232,13 +243,19 @@ def _run_subprocess(
     *,
     cwd: Path | None,
     timeout: float | None,
+    input: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str] | None, str | None, str]:
-    """执行子进程，返回 (proc|None, error|None, executable)。"""
+    """执行子进程，返回 (proc|None, error|None, executable)。
+
+    ``input`` 作为 stdin 传入（codex exec 用 ``-`` 读取），避免把多行 prompt
+    塞进命令行参数时在 Windows 上被截断。
+    """
     try:
         proc = subprocess.run(
             cmd,
             env=env,
             cwd=cwd,
+            input=input,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -346,7 +363,7 @@ def _codex_once(
     )
     executable = resolve_codex(cfg)
     if resume_thread_id is None:
-        cmd = build_command(cfg, prompt, output_path, executable=executable)
+        cmd = build_command(cfg, "-", output_path, executable=executable)
         cwd: Path | None = None
     else:
         cmd = [
@@ -354,7 +371,7 @@ def _codex_once(
             "exec",
             "resume",
             resume_thread_id,
-            prompt,
+            "-",
             "-m",
             cfg.model,
             "--json",
@@ -362,8 +379,30 @@ def _codex_once(
             str(output_path),
         ]
         cwd = cfg.project_root
+    log_event(
+        logger,
+        "DEBUG",
+        "exec.subprocess.start",
+        sample_id=sample.id,
+        epoch=epoch,
+        round=round_num,
+        resume=resume_thread_id is not None,
+        command=" ".join(cmd),
+    )
+    subprocess_started = time.perf_counter()
     proc, error, _ = _run_subprocess(
-        cmd, env, cwd=cwd, timeout=cfg.timeout_seconds
+        cmd, env, cwd=cwd, timeout=cfg.timeout_seconds, input=prompt
+    )
+    log_event(
+        logger,
+        "INFO" if error is None and (proc is not None and proc.returncode == 0) else "ERROR",
+        "exec.subprocess.done",
+        sample_id=sample.id,
+        epoch=epoch,
+        round=round_num,
+        duration_ms=round((time.perf_counter() - subprocess_started) * 1000, 2),
+        returncode=proc.returncode if proc is not None else None,
+        error=error,
     )
     return _finish_result(
         sample,

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .log import get_logger, log_event
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -40,12 +45,20 @@ def write_report(report: RunReport, run_dir: str | Path) -> Path:
     """把报告写到 run_dir/report.json，返回路径。"""
     from dataclasses import asdict
 
+    started = time.perf_counter()
     out = Path(run_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / "report.json"
     path.write_text(
         json.dumps(asdict(report), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+    )
+    log_event(
+        logger,
+        "INFO",
+        "report.write.done",
+        path=str(path),
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
     )
     return path
 
@@ -162,24 +175,17 @@ def assemble_report(
 
 
 def print_summary(report: RunReport) -> None:
-    print(
-        f"[评测完成] run_id={report.run_id} 样本={report.total_samples} "
-        f"trace={report.total_traces} 平均分={report.overall_average:.3f} "
-        f"通过率={report.pass_rate:.1%}"
+    log_event(
+        logger,
+        "INFO",
+        "summary",
+        run_id=report.run_id,
+        total_samples=report.total_samples,
+        total_traces=report.total_traces,
+        pass_rate=report.pass_rate,
+        overall_average=report.overall_average,
+        dimension_averages=report.dimension_averages,
+        deterministic_stats=report.deterministic_stats,
+        held_rate=report.held_rate,
+        mean_rounds=report.mean_rounds,
     )
-    if report.dimension_averages:
-        dims = ", ".join(
-            f"{k}={v:.3f}" for k, v in sorted(report.dimension_averages.items())
-        )
-        print(f"[维度均分] {dims}")
-    if report.deterministic_stats:
-        dets = ", ".join(
-            f"{name}(pass@k={stats.get('pass_at_k_rate', 0):.1%})"
-            for name, stats in sorted(report.deterministic_stats.items())
-        )
-        print(f"[确定性 pass@k] {dets}")
-    if report.mean_rounds > 0:
-        print(
-            f"[多轮] 平均轮数={report.mean_rounds:.2f} "
-            f"坚持正确率={report.held_rate:.1%}"
-        )
